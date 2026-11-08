@@ -70,9 +70,10 @@ Set up eyeSpy (https://github.com/Ermag/eyespy), a self-hosted Android security 
    Never print the token or topic in chat; tell me which file holds them.
 3. Do not forward the port on the router or expose it through any tunnel or reverse proxy.
    It must stay LAN/VPN-only.
-4. Build the app: install JDK 17+ and the Android SDK if missing, then run android/release.sh.
-   Tell me to back up android/keystore/ (needed for future updates).
-5. Install android/dist/eyespy-release.apk on both phones with `adb -s <serial> install`.
+4. Get the app: download the APK from the latest GitHub release and check its .sha256. Or, if I
+   ask you to build it, install JDK 17+ and the Android SDK and run android/release.sh, then tell
+   me to back up android/keystore/ (needed for future updates).
+5. Install the APK on both phones with `adb -s <serial> install`.
    If the install hangs, `adb push` it to /data/local/tmp and run `pm install` there.
 6. Walk me through each phone's setup screen: server URL http://<server-ip>:<port> and the token
    (type it with `adb shell input text` so it never appears in chat).
@@ -107,22 +108,21 @@ curl http://localhost:8080/healthz
 Keep the port LAN/VPN-only: don't forward it on your router. Push notifications and presence only
 use outbound HTTPS to ntfy.sh, and you can [self-host ntfy](https://docs.ntfy.sh/install/) instead.
 
-### 2. Build the app
+### 2. Get the app
 
-You need JDK 17+ and the Android SDK (Android Studio installs both).
+**Download** the APK from [Releases](https://github.com/Ermag/eyespy/releases/latest) and open it
+on both phones (allow "install unknown apps"), or install it with `adb install`.
+
+**Or build it yourself** with JDK 17+ and the Android SDK (Android Studio installs both):
 
 ```bash
 android/release.sh
-```
-
-The first run creates your signing key in `android/keystore/`. **Back it up**: updates must be
-signed with the same key. Install the APK on both phones:
-
-```bash
 adb install -r android/dist/eyespy-release.apk
 ```
 
-You can also copy the APK to the phone and open it there (allow "install unknown apps").
+The first build creates your own signing key in `android/keystore/`. **Back it up**: updates must
+be signed with the same key. A self-built APK and the Releases APK are signed with different keys,
+so to switch between them you have to uninstall eyeSpy first.
 
 ### 3. Camera phone
 
