@@ -1,0 +1,21 @@
+services:
+  eyespy:
+    build: ./server
+    container_name: eyespy
+    restart: unless-stopped
+    env_file: .env
+    # run as the host user so ./data stays owned by you (not root)
+    user: "${EYESPY_UID:-1000}:${EYESPY_GID:-1000}"
+    environment:
+      TZ: ${TZ:-UTC}
+      TMPDIR: /data/.tmp          # upload spool on disk, not in RAM
+    ports:
+      - "${EYESPY_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    # hardening: immutable image filesystem, no Linux capabilities.
+    # (no-new-privileges is left out: with snap-packaged Docker its AppArmor profile then blocks exec.)
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]

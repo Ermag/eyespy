@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eyeSpy</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f6f4; --fg:#1b1b1b; --muted:#6b6b6b; --card:#fff; --line:#e3e3e0; --accent:#c4352b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121212; --fg:#eaeaea; --muted:#9a9a9a; --card:#1d1d1d; --line:#2c2c2c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 12px; } h2 { font-size: 16px; margin: 20px 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  button, input, select { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+  button.on { background:var(--fg); color:var(--bg); }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--muted); margin-right:6px; }
+  .dot.red { background:var(--accent); } .dot.green { background:#2f9e44; }
+  .muted { color:var(--muted); }
+  img.live, video { width:100%; max-height:60vh; background:#000; border-radius:8px; object-fit:contain; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; }
+  .seg { cursor:pointer; font-size:13px; } .seg img { width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:6px; background:#000; }
+  .seg.motion { outline:2px solid var(--accent); border-radius:6px; }
+  ul { padding-left: 18px; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>eyeSpy</h1>
+  <div id="login" class="card row" hidden>
+    <input id="tok" type="password" placeholder="API token" size="40">
+    <button onclick="localStorage.tok=tok.value; location.reload()">Save</button>
+  </div>
+  <div id="app" hidden>
+    <div class="card">
+      <div class="row" id="status"></div>
+      <div class="row" style="margin-top:10px">
+        Mode: <span id="modes"></span>
+        <button onclick="toggleLive()" id="liveBtn">Show live</button>
+      </div>
+    </div>
+    <div id="liveBox" hidden style="margin-top:10px"><img class="live" id="liveImg" alt="live"></div>
+    <h2>Footage</h2>
+    <div class="row"><select id="day" onchange="loadSegs()"></select>
+      <label><input type="checkbox" id="motionOnly" onchange="loadSegs()"> motion only</label></div>
+    <video id="player" controls hidden style="margin-top:10px"></video>
+    <div class="grid" id="segs" style="margin-top:10px"></div>
+    <h2>Events</h2>
+    <div class="card"><ul id="events"></ul></div>
+  </div>
+</main>
+<script>
+const T = localStorage.tok;
+// <img>/<video> can't send headers, so media URLs carry a short-lived read-only media token, never T.
+let MT = '';
+const q = p => p + (p.includes('?') ? '&' : '?') + 'mt=' + encodeURIComponent(MT);
+async function refreshMt() { MT = (await api('/api/media-token')).mt; }
+const api = (p, o={}) => fetch(p, {...o, headers:{...(o.headers||{}), Authorization:'Bearer '+T}})
+  .then(r => { if (r.status===401) { delete localStorage.tok; location.reload(); } return r.json(); });
+const fmt = ms => new Date(ms).toLocaleString();
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+if (!T) { login.hidden = false; } else { app.hidden = false; init(); }
+
+async function refresh() {
+  const s = await api('/api/status');
+  status.innerHTML =
+    `<span><span class="dot ${s.armed?'red':''}"></span>${s.armed?'Armed':'Disarmed'} <span class="muted">(${esc(s.arm_reason)})</span></span>` +
+    `<span><span class="dot ${s.recording?'red':''}"></span>${s.recording?'Recording':'Not recording'}</span>` +
+    `<span><span class="dot ${s.camera.online?'green':''}"></span>Camera ${s.camera.online?'online':'offline'}` +
+    (s.camera.info.battery!=null ? ` <span class="muted">${s.camera.info.battery}% ${s.camera.info.temp_c??''}°C</span>` : '') + `</span>` +
+    s.presence.map(p => `<span class="muted">${esc(p.device)}: ${p.state}</span>`).join('');
+  modes.innerHTML = ['auto','armed','disarmed'].map(m =>
+    `<button class="${s.mode===m?'on':''}" onclick="setMode('${m}')">${m}</button>`).join(' ');
+}
+async function setMode(m) { await api('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode:m})}); refresh(); }
+function toggleLive() {
+  const on = liveBox.hidden; liveBox.hidden = !on; liveBtn.textContent = on ? 'Hide live' : 'Show live';
+  liveImg.src = on ? q('/api/live.mjpeg') : '';
+}
+async function loadDays() {
+  const d = await api('/api/days');
+  day.innerHTML = d.map(x => `<option value="${x.day}">${x.day} (${x.segments}, ${x.motion_segments||0} motion)</option>`).join('');
+  loadSegs();
+}
+async function loadSegs() {
+  if (!day.value) { segs.innerHTML = '<span class="muted">No footage yet</span>'; return; }
+  const list = await api(`/api/segments?day=${day.value}&motion_only=${motionOnly.checked}`);
+  segs.innerHTML = list.map(x => `<div class="seg ${x.has_motion?'motion':''}" onclick="play('${x.video}')">
+     ${x.thumb ? `<img loading="lazy" src="${q(x.thumb)}">` : ''}
+     ${new Date(x.started_at).toLocaleTimeString()} · ${Math.round(x.duration_ms/1000)}s</div>`).join('');
+}
+function play(v, offset=0) { player.hidden=false; player.src=q(v); player.currentTime=offset/1000; player.play(); player.scrollIntoView({behavior:'smooth'}); }
+async function openEvent(id) { const e = await api('/api/events/'+id); if (e.segment) play(e.segment.video, e.offset_ms); else alert('Footage not uploaded yet'); }
+async function loadEvents() {
+  const ev = await api('/api/events?limit=50');
+  events.innerHTML = ev.map(e => `<li>${fmt(e.ts)} — <b>${e.type.replace('_',' ')}</b>
+    ${e.detail.reason||e.detail.device ? `<span class="muted">${esc(e.detail.reason||(e.detail.device+' '+e.detail.state))}</span>`:''}
+    ${e.type==='motion' ? ` <a href="#" onclick="openEvent(${e.id});return false">view</a>` : ''}</li>`).join('');
+}
+async function init() {
+  await refreshMt(); setInterval(refreshMt, 30 * 60 * 1000);
+  refresh(); loadDays(); loadEvents(); setInterval(refresh, 5000); setInterval(loadEvents, 30000);
+}
+</script>
+</body>
+</html>

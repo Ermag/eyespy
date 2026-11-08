@@ -1,0 +1,37 @@
+# Secrets and per-install config: never commit
+.env
+.env.*
+!.env.example
+*.local.md
+
+# Footage and runtime data
+data/
+
+# App signing keys and built APKs
+android/keystore/
+android/dist/
+*.jks
+*.keystore
+*.p12
+*.apk
+*.aab
+*.idsig
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Android / Gradle / IDE
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+.idea/
+.vscode/
+
+# OS
+.DS_Store
