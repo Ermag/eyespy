@@ -60,4 +60,15 @@ class Prefs(ctx: Context) {
     var lastPresence: String? get() = p.getString("lastPresence", null); set(v) = put("lastPresence", v)
     var lastPresenceTs: Long get() = p.getLong("lastPresenceTs", 0); set(v) = put("lastPresenceTs", v)
     var lastPresenceVia: String get() = str("lastPresenceVia", ""); set(v) = put("lastPresenceVia", v)
+    /** Wi-Fi access points (BSSIDs) seen while confirmed at home. Being on one of them = home. */
+    var homeBssids: Set<String>
+        get() = p.getStringSet("homeBssids", emptySet())?.toSet() ?: emptySet()
+        set(v) = p.edit().putStringSet("homeBssids", v).apply()
+    /** Last presence decisions, newest first, "<ts>|<text>" per line. */
+    var presenceLog: List<String>
+        get() = str("presenceLog", "").lines().filter { it.isNotBlank() }
+        set(v) = put("presenceLog", v.take(8).joinToString("\n"))
+    var lastPresenceCheckTs: Long get() = p.getLong("lastPresenceCheckTs", 0); set(v) = put("lastPresenceCheckTs", v)
+
+    fun logPresence(text: String) { presenceLog = listOf("${System.currentTimeMillis()}|$text") + presenceLog }
 }

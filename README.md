@@ -21,7 +21,9 @@ no account**.
   screen off.
 - **Motion detection** with lighting-change rejection, snapshots and an adjustable sensitivity.
 - **Auto arm / disarm by presence**: a geofence on your phone tells the server when you leave and
-  return. Manual *Armed* / *Off* modes too.
+  return. The phone double-checks each change (home Wi-Fi, then a fresh GPS fix) before sending
+  it, so a stray location fix can't arm the camera while you're home. Manual *Armed* / *Off*
+  modes too.
 - **Push notifications on any network** through [ntfy](https://ntfy.sh): recording started or
   stopped, motion detected, camera offline. Tapping one opens the clip.
 - **Viewer app**: status, live view, footage by day, events. There's also a small web dashboard.

@@ -76,7 +76,7 @@ class Hub:
 
     async def set_presence(self, device: str, state: str, ts: int, via: str) -> bool:
         """Returns False if this report is older than what we already have (replay / out of order)."""
-        rows = self.db.q("SELECT ts FROM presence WHERE device=?", (device,))
+        rows = self.db.q("SELECT ts, state FROM presence WHERE device=?", (device,))
         if rows and rows[0]["ts"] >= ts:
             return False
         self.db.x(
@@ -84,6 +84,9 @@ class Hub:
             "ON CONFLICT(device) DO UPDATE SET state=excluded.state, ts=excluded.ts, via=excluded.via",
             (device, state, ts, via),
         )
+        if rows and rows[0]["state"] == state:
+            # periodic check-in: same state, just fresher. No event, no log line.
+            return True
         self.db.event("presence", {"device": device, "state": state, "via": via}, ts=ts)
         log.info("presence %s -> %s (via %s)", device, state, via)
         await self.reevaluate()

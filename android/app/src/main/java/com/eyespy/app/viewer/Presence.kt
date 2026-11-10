@@ -7,29 +7,37 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Location
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.eyespy.app.Api
 import com.eyespy.app.Net
 import com.eyespy.app.Prefs
+import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingEvent
 import com.google.android.gms.location.GeofencingRequest
 import com.google.android.gms.location.LocationServices
-import kotlinx.coroutines.CoroutineScope
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -43,8 +51,9 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Presence = is this phone at home? A geofence around home flips home/away; each change is sent
- * to the server directly (works on home Wi-Fi or VPN) or, failing that, as an HMAC-signed message
+ * to the server directly (works on home Wi-Fi or VPN) or, failing that, as an encrypted message
  * through the ntfy presence topic, which the server subscribes to. So it works on any network.
+ * Transitions are confirmed before they are sent (PresenceCheck / PresenceLogic).
  */
 object Presence {
     private const val TAG = "eyespy.presence"
@@ -78,11 +87,12 @@ object Presence {
             .addGeofence(fence)
             .build()
         LocationServices.getGeofencingClient(ctx).addGeofences(req, pendingIntent(ctx))
-            .addOnSuccessListener { Log.i(TAG, "geofence registered"); onResult(null) }
+            .addOnSuccessListener { Log.i(TAG, "geofence registered"); PresenceCheck.schedulePeriodic(ctx); onResult(null) }
             .addOnFailureListener { Log.w(TAG, "geofence failed", it); onResult("Geofence failed: ${it.message}") }
     }
 
     fun unregister(ctx: Context) {
+        PresenceCheck.cancel(ctx)
         LocationServices.getGeofencingClient(ctx).removeGeofences(pendingIntent(ctx))
     }
 
@@ -170,16 +180,123 @@ class GeofenceReceiver : BroadcastReceiver() {
             Geofence.GEOFENCE_TRANSITION_EXIT -> "away"
             else -> return
         }
-        if (Prefs(ctx).lastPresence == state && Prefs(ctx).lastPresenceVia != "pending" &&
-            System.currentTimeMillis() - Prefs(ctx).lastPresenceTs < 60_000
+        val p = Prefs(ctx)
+        if (p.lastPresence == state && p.lastPresenceVia != "pending" &&
+            System.currentTimeMillis() - p.lastPresenceTs < 60_000
         ) return
-        val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                Presence.report(ctx, state)
-            } finally {
-                pending.finish()
+        // Don't trust the transition blindly: confirm it first (see PresenceLogic).
+        PresenceCheck.confirm(ctx, state)
+    }
+}
+
+/**
+ * Confirms geofence transitions before reporting them, and checks in every few hours so the
+ * server's "last reported" stays fresh and a missed transition gets corrected.
+ */
+object PresenceCheck {
+    private const val TAG = "eyespy.presence"
+    private const val CONFIRM = "presence-confirm"
+    private const val PERIODIC = "presence-periodic"
+    private val RETRY_DELAY_S = 120L
+
+    /** Start confirming a transition; a newer transition replaces one still being confirmed. */
+    fun confirm(ctx: Context, candidate: String, attempt: Int = 1, delayS: Long = 0) {
+        val work = OneTimeWorkRequestBuilder<PresenceCheckWorker>()
+            .setInputData(workDataOf("candidate" to candidate, "attempt" to attempt))
+            .setInitialDelay(delayS, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork(CONFIRM, ExistingWorkPolicy.REPLACE, work)
+    }
+
+    fun schedulePeriodic(ctx: Context) {
+        val work = PeriodicWorkRequestBuilder<PresenceCheckWorker>(4, TimeUnit.HOURS, 30, TimeUnit.MINUTES).build()
+        WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, work)
+    }
+
+    fun cancel(ctx: Context) {
+        WorkManager.getInstance(ctx).cancelUniqueWork(CONFIRM)
+        WorkManager.getInstance(ctx).cancelUniqueWork(PERIODIC)
+    }
+
+    /** BSSID of the current Wi-Fi access point, or null (not on Wi-Fi, or hidden by the OS). */
+    @Suppress("DEPRECATION")
+    fun currentBssid(ctx: Context): String? {
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return null
+        val b = runCatching { wm.connectionInfo?.bssid }.getOrNull()?.lowercase()
+        return b?.takeIf { it != "02:00:00:00:00:00" && it != "00:00:00:00:00:00" }
+    }
+
+    /** Remember the current access point as home (call only when home is certain). */
+    fun learnHomeWifi(ctx: Context, reset: Boolean = false) {
+        val p = Prefs(ctx)
+        val b = currentBssid(ctx)
+        p.homeBssids = (if (reset) emptySet() else p.homeBssids) + listOfNotNull(b)
+        if (b != null) Log.i(TAG, "home Wi-Fi access points: ${p.homeBssids.size}")
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun freshFix(ctx: Context): Location? {
+        if (!Presence.hasPermissions(ctx)) return null
+        val req = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setDurationMillis(30_000)
+            .setMaxUpdateAgeMillis(0) // never a cached fix: it may be the very outlier that triggered the transition
+            .build()
+        val cts = CancellationTokenSource()
+        return withTimeoutOrNull(35_000) {
+            suspendCancellableCoroutine { c ->
+                c.invokeOnCancellation { cts.cancel() }
+                LocationServices.getFusedLocationProviderClient(ctx).getCurrentLocation(req, cts.token)
+                    .addOnSuccessListener { if (c.isActive) c.resume(it) }
+                    .addOnFailureListener { if (c.isActive) c.resume(null) }
+                    .addOnCanceledListener { if (c.isActive) c.resume(null) }
             }
         }
+    }
+
+    suspend fun observe(ctx: Context): PresenceLogic.Observation {
+        val p = Prefs(ctx)
+        val bssid = currentBssid(ctx)
+        if (bssid != null && bssid in p.homeBssids) return PresenceLogic.Observation(true, null, null)
+        val fix = freshFix(ctx) ?: return PresenceLogic.Observation(false, null, null)
+        val out = FloatArray(1)
+        Location.distanceBetween(p.homeLat, p.homeLng, fix.latitude, fix.longitude, out)
+        return PresenceLogic.Observation(false, out[0], if (fix.hasAccuracy()) fix.accuracy else null)
+    }
+
+    /** One step of confirming a transition (candidate != null) or a periodic check (null). */
+    suspend fun run(ctx: Context, candidate: String?, attempt: Int) {
+        val p = Prefs(ctx)
+        if (!p.presenceEnabled || !p.hasHome) return
+        if (candidate == null) Presence.register(ctx) // also heals a geofence lost to a GMS reset
+        val o = observe(ctx)
+        p.lastPresenceCheckTs = System.currentTimeMillis()
+        val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
+        when (val d = PresenceLogic.decide(candidate, o, p.homeRadius, attempt)) {
+            is PresenceLogic.Decision.Report -> {
+                // Learn the access point only when a precise fix puts us inside home.
+                if (!o.onHomeWifi && PresenceLogic.observed(o, p.homeRadius)?.first == "home") learnHomeWifi(ctx)
+                Log.i(TAG, "report ${d.state}: ${d.why}")
+                if (d.state != p.lastPresence) p.logPresence("Reported \"${d.state}\" at $time: ${d.why}")
+                Presence.report(ctx, d.state)
+            }
+            is PresenceLogic.Decision.Ignore -> {
+                Log.i(TAG, "ignored ${d.candidate}: ${d.why}")
+                p.logPresence("Ignored a false \"${d.candidate}\" at $time: ${d.why}")
+                if (p.lastPresence != null) Presence.report(ctx, p.lastPresence!!) // keep the server in sync
+            }
+            PresenceLogic.Decision.Retry -> {
+                Log.i(TAG, "unsure about $candidate (attempt $attempt, fix=${o.distanceM?.toInt()}±${o.accuracyM?.toInt()} m), retrying")
+                confirm(ctx, candidate!!, attempt + 1, RETRY_DELAY_S)
+            }
+            PresenceLogic.Decision.NoChange -> Log.i(TAG, "periodic check: no confident fix")
+        }
+    }
+}
+
+class PresenceCheckWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result {
+        PresenceCheck.run(applicationContext, inputData.getString("candidate"), inputData.getInt("attempt", 1))
+        return Result.success()
     }
 }

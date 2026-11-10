@@ -78,6 +78,7 @@ import com.eyespy.app.Prefs
 import com.eyespy.app.Segment
 import com.eyespy.app.Status
 import com.eyespy.app.viewer.Presence
+import com.eyespy.app.viewer.PresenceCheck
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
@@ -435,6 +436,7 @@ fun ViewerSettings(api: Api, prefs: Prefs, onReset: () -> Unit, onBack: () -> Un
                             .addOnSuccessListener { loc ->
                                 if (loc == null) { msg = "No location fix, try again outside/near a window."; return@addOnSuccessListener }
                                 prefs.homeLat = loc.latitude; prefs.homeLng = loc.longitude; prefs.hasHome = true; hasHome = true
+                                PresenceCheck.learnHomeWifi(ctx, reset = true)
                                 msg = "Home set (±${loc.accuracy.toInt()} m)."
                                 if (enabled) applyPresence(true)
                             }
@@ -450,6 +452,14 @@ fun ViewerSettings(api: Api, prefs: Prefs, onReset: () -> Unit, onBack: () -> Un
                 }
                 prefs.lastPresence?.let {
                     Text("Last reported: $it, ${fmtAgo(prefs.lastPresenceTs)} (${prefs.lastPresenceVia})", style = MaterialTheme.typography.bodySmall)
+                }
+                if (enabled) Text(
+                    "Checked every few hours" + (if (prefs.lastPresenceCheckTs > 0) ", last ${fmtAgo(prefs.lastPresenceCheckTs)}" else "") +
+                        ". Home Wi-Fi access points learned: ${prefs.homeBssids.size}.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                prefs.presenceLog.take(3).forEach { line ->
+                    Text(line.substringAfter('|'), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { scope.launch { Presence.report(ctx, "home"); msg = "Sent home (${prefs.lastPresenceVia})" } }) { Text("Report home") }
